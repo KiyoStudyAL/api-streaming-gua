@@ -5,20 +5,16 @@ import { ANIME } from "@consumet/extensions";
 
 const app = express();
 
-// WAJIB ditambahin ini biar Render tau dia jalan di HTTPS
+// Kepercayaan penuh buat HTTPS dari Render
 app.set('trust proxy', true); 
 
-// Aktifkan CORS untuk semua domain (Biar Netlify lu bebas akses)
-app.use(cors({
-    origin: '*',
-    methods:['GET', 'POST', 'OPTIONS'],
-}));
+// CORS dibuka lebar untuk Netlify
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
 
-// Gunakan provider AnimeKai sesuai permintaan lu
 const provider = new ANIME.AnimeKai();
 
 // ==========================================
-// 1. ENDPOINT UTAMA (Pencarian, Info, Link Video)
+// 1. ENDPOINT ANIME (Scraper)
 // ==========================================
 app.get('/api/anime', async (req, res) => {
     const action = req.query.action;
@@ -26,75 +22,115 @@ app.get('/api/anime', async (req, res) => {
     try {
         if (action === 'search') {
             const q = req.query.q;
-            if (!q) return res.status(400).json({ sukses: false, pesan: "Kata kunci kosong" });
             const result = await provider.search(q);
             return res.json({ sukses: true, data: result.results });
         }
         
         if (action === 'info') {
             const id = req.query.id;
-            if (!id) return res.status(400).json({ sukses: false, pesan: "ID Anime kosong" });
             const info = await provider.fetchAnimeInfo(id);
             return res.json({ sukses: true, data: info });
         }
         
         if (action === 'watch') {
-            const id = req.query.id;
-            if (!id) return res.status(400).json({ sukses: false, pesan: "ID Episode kosong" });
+            const rawId = req.query.id;
+            // Decode URI dua kali untuk memastikan simbol aneh aman
+            const id = decodeURIComponent(rawId);
+            
             const watch = await provider.fetchEpisodeSources(id);
             
-            if (!watch.sources || watch.sources.length === 0) {
-                return res.status(404).json({ sukses: false, pesan: "Stream tidak tersedia saat ini" });
+            if (!watch || !watch.sources || watch.sources.length === 0) {
+                return res.status(404).json({ sukses: false, pesan: "Stream tidak ditemukan di server asal." });
             }
-            // Kirim link video resolusi tertinggi/default (index 0)
-            return res.json({ sukses: true, link: watch.sources[0].url });
+            
+            // Prioritaskan kualitas 'auto' atau ambil yang pertama
+            const defaultSource = watch.sources.find(s => s.quality === 'auto' || s.quality === 'default') || watch.sources[0];
+            
+            return res.json({ sukses: true, link: defaultSource.url });
         }
         
         return res.status(400).json({ sukses: false, pesan: "Aksi tidak dikenali" });
         
     } catch (error) {
-        console.error("Anime API Error:", error.message);
-        return res.status(500).json({ sukses: false, pesan: "Terjadi kesalahan server internal." });
+        console.error("API Error pada action", action, ":", error.message);
+        // Ngasih tau error aslinya ke Frontend biar gampang di-debug
+        return res.status(500).json({ 
+            sukses: false, 
+            pesan: "Error dari server penyedia Anime.",
+            detail: error.message 
+        });
     }
 });
 
 // ==========================================
-// 2. ENDPOINT PROXY (Bypass CORS & Rewrite M3U8)
+// 2. ENDPOINT PROXY (Video Player)
 // ==========================================
 app.get('/api/proxy', async (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).send("No URL provided");
 
     try {
-        // Ambil origin asli untuk menyamar (Bypass proteksi 403 Forbidden)
-        const targetOrigin = new URL(targetUrl).origin;
+        const target = new URL(targetUrl);
+        
+        // Header Penyamaran Super (Anti Blokir)
+        const headers = { 
+            'Referer': target.origin + '/', 
+            'Origin': target.origin,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        };
 
         const response = await axios.get(targetUrl, {
-            headers: { 
-                'Referer': targetOrigin,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
+            headers: headers,
             responseType: 'arraybuffer',
-            timeout: 20000 // Timeout 20 detik (Render kadang butuh waktu)
+            timeout: 20000 
         });
 
-        // Set Headers untuk balasan ke frontend lu
+        res.setHeader('Access-Control-Allow-Origin', '*');
         const contentType = response.headers['content-type'] || 'application/vnd.apple.mpegurl';
         res.setHeader('Content-Type', contentType);
-        res.setHeader('Access-Control-Allow-Origin', '*');
 
-        // Cek apakah ini file playlist M3U8
-        const isM3u8 = targetUrl.includes('.m3u8') || contentType.includes('mpegurl');
+        const isM3u8 = targetUrl.includes('.m3u8') || contentType.toLowerCase().includes('mpegurl');
 
         if (isM3u8) {
-            // Deteksi link Render lu otomatis untuk bikin URL proxy
-            const protocol = req.protocol; // akan otomatis jadi 'https' di Render
-            const host = req.get('host');
-            const proxyEndpoint = `${protocol}://${host}/api/proxy?url=`;
-
+            const proxyBase = `${req.protocol}://${req.get('host')}/api/proxy?url=`;
             let playlist = Buffer.from(response.data).toString('utf8');
             
             playlist = playlist.split('\n').map(line => {
+                // Eksekusi Kunci Enkripsi
+                if (line.startsWith('#EXT-X-KEY:')) {
+                    return line.replace(/URI="(.*?)"/, (match, p1) => {
+                        const absUrl = new URL(p1, targetUrl).href;
+                        return `URI="${proxyBase}${encodeURIComponent(absUrl)}"`;
+                    });
+                }
+                if (line.startsWith('#') || !line.trim()) return line;
+                
+                // Ganti URL Segment File (.ts)
+                const absUrl = new URL(line.trim(), targetUrl).href;
+                return `${proxyBase}${encodeURIComponent(absUrl)}`;
+            }).join('\n');
+            
+            return res.send(playlist);
+        }
+        
+        return res.send(response.data);
+        
+    } catch (error) {
+        console.error("Proxy Error untuk URL:", targetUrl);
+        if (error.response) {
+            console.error("Status Ditolak Server:", error.response.status);
+            return res.status(error.response.status).send(`Proxy Ditolak Server Asli: Error ${error.response.status}`);
+        }
+        return res.status(500).send("Proxy Request Timeout/Gagal");
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🚀 API Server berjalan di port ${PORT}`);
+});            playlist = playlist.split('\n').map(line => {
                 // 1. Rewrite URL kunci enkripsi (Jika ada)
                 if (line.startsWith('#EXT-X-KEY:')) {
                     return line.replace(/URI="(.*?)"/, (match, p1) => {
