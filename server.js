@@ -2,15 +2,19 @@ import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
 import { ANIME } from "@consumet/extensions";
+import apicache from 'apicache'; // Tambahkan apicache
 
 const app = express();
 app.set('trust proxy', true); 
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
+app.use(cors({ origin: '*', methods:['GET', 'POST', 'OPTIONS'] }));
+
+// Setup Cache (simpan data 5 menit agar server tidak capek scrape terus)
+const cache = apicache.middleware;
 
 const provider = new ANIME.AnimeKai();
 
-// 1. API Scraper
-app.get('/api/anime', async (req, res) => {
+// 1. API Scraper (Gunakan Cache 5 Menit di sini)
+app.get('/api/anime', cache('5 minutes'), async (req, res) => {
     const { action, q, id } = req.query;
     try {
         if (action === 'search') {
@@ -37,19 +41,22 @@ app.get('/api/anime', async (req, res) => {
 app.get('/api/proxy', async (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).send("No URL");
+
     try {
         const target = new URL(targetUrl);
-        const response = await axios.get(targetUrl, {
-            headers: { 'Referer': target.origin + '/', 'User-Agent': 'Mozilla/5.0' },
-            responseType: 'arraybuffer',
-            timeout: 20000 
-        });
+        const isM3u8 = targetUrl.includes('.m3u8');
 
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        const contentType = response.headers['content-type'] || 'application/vnd.apple.mpegurl';
-        res.setHeader('Content-Type', contentType);
+        // Jika M3U8, kita ambil teksnya untuk dimodifikasi
+        if (isM3u8) {
+            const response = await axios.get(targetUrl, {
+                headers: { 'Referer': target.origin + '/', 'User-Agent': 'Mozilla/5.0' },
+                responseType: 'arraybuffer',
+                timeout: 20000 
+            });
 
-        if (targetUrl.includes('.m3u8') || contentType.includes('mpegurl')) {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Content-Type', response.headers['content-type'] || 'application/vnd.apple.mpegurl');
+
             const proxyBase = `${req.protocol}://${req.get('host')}/api/proxy?url=`;
             let playlist = Buffer.from(response.data).toString('utf8');
             playlist = playlist.split('\n').map(line => {
@@ -59,10 +66,28 @@ app.get('/api/proxy', async (req, res) => {
                 if (line.startsWith('#') || !line.trim()) return line;
                 return `${proxyBase}${encodeURIComponent(new URL(line.trim(), targetUrl).href)}`;
             }).join('\n');
+            
             return res.send(playlist);
-        }
-        res.send(response.data);
-    } catch (e) { res.status(500).send("Proxy Error"); }
+        } 
+        
+        // JIKA BUKAN M3U8 (.ts video segments), GUNAKAN STREAM AGAR RAM AMAN!
+        const streamResponse = await axios({
+            method: 'get',
+            url: targetUrl,
+            responseType: 'stream', // Penting: Ini tidak akan membebani RAM Server
+            headers: { 'Referer': target.origin + '/', 'User-Agent': 'Mozilla/5.0' },
+            timeout: 20000
+        });
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Content-Type', streamResponse.headers['content-type'] || 'video/MP2T');
+        
+        // Langsung alirkan (pipe) dari sumber ke penonton
+        streamResponse.data.pipe(res);
+
+    } catch (e) { 
+        res.status(500).send("Proxy Error"); 
+    }
 });
 
 const PORT = process.env.PORT || 3000;
