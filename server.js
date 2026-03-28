@@ -1,116 +1,132 @@
 import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
-import { META } from "@consumet/extensions";
-import apicache from 'apicache';
+import { ANIME } from "@consumet/extensions";
 
 const app = express();
-app.use(cors());
 
-// Serve folder public untuk frontend (UI)
-app.use(express.static('public'));
+// WAJIB ditambahin ini biar Render tau dia jalan di HTTPS
+app.set('trust proxy', true); 
 
-// Gunakan META Anilist (Ini otomatis nge-map ID Anilist lu ke Gogoanime/Zoro)
-const anilistProvider = new META.Anilist(); 
-const cache = apicache.middleware;
+// Aktifkan CORS untuk semua domain (Biar Netlify lu bebas akses)
+app.use(cors({
+    origin: '*',
+    methods:['GET', 'POST', 'OPTIONS'],
+}));
 
-const HEADERS = {
-    'Referer': 'https://gogoanime.hd/',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-};
+// Gunakan provider AnimeKai sesuai permintaan lu
+const provider = new ANIME.AnimeKai();
 
-// 1. Get Episodes by AniList ID
-app.get('/api/episodes/:anilistId', cache('1 hours'), async (req, res) => {
+// ==========================================
+// 1. ENDPOINT UTAMA (Pencarian, Info, Link Video)
+// ==========================================
+app.get('/api/anime', async (req, res) => {
+    const action = req.query.action;
+    
     try {
-        const { anilistId } = req.params;
-        const info = await anilistProvider.fetchAnimeInfo(anilistId);
-        
-        if (!info || !info.episodes) {
-            return res.status(404).json({ success: false, message: "Episode tidak ditemukan" });
+        if (action === 'search') {
+            const q = req.query.q;
+            if (!q) return res.status(400).json({ sukses: false, pesan: "Kata kunci kosong" });
+            const result = await provider.search(q);
+            return res.json({ sukses: true, data: result.results });
         }
-
-        res.json({ success: true, episodes: info.episodes });
-    } catch (e) {
-        res.status(500).json({ success: false, message: e.message });
+        
+        if (action === 'info') {
+            const id = req.query.id;
+            if (!id) return res.status(400).json({ sukses: false, pesan: "ID Anime kosong" });
+            const info = await provider.fetchAnimeInfo(id);
+            return res.json({ sukses: true, data: info });
+        }
+        
+        if (action === 'watch') {
+            const id = req.query.id;
+            if (!id) return res.status(400).json({ sukses: false, pesan: "ID Episode kosong" });
+            const watch = await provider.fetchEpisodeSources(id);
+            
+            if (!watch.sources || watch.sources.length === 0) {
+                return res.status(404).json({ sukses: false, pesan: "Stream tidak tersedia saat ini" });
+            }
+            // Kirim link video resolusi tertinggi/default (index 0)
+            return res.json({ sukses: true, link: watch.sources[0].url });
+        }
+        
+        return res.status(400).json({ sukses: false, pesan: "Aksi tidak dikenali" });
+        
+    } catch (error) {
+        console.error("Anime API Error:", error.message);
+        return res.status(500).json({ sukses: false, pesan: "Terjadi kesalahan server internal." });
     }
 });
 
-// 2. Get Video Sources (M3U8) by Episode ID
-app.get('/api/sources/:episodeId', cache('1 hours'), async (req, res) => {
+// ==========================================
+// 2. ENDPOINT PROXY (Bypass CORS & Rewrite M3U8)
+// ==========================================
+app.get('/api/proxy', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.status(400).send("No URL provided");
+
     try {
-        const { episodeId } = req.params;
-        const watch = await anilistProvider.fetchEpisodeSources(episodeId);
-        
-        if (!watch || !watch.sources?.length) {
-            return res.status(404).json({ success: false, message: "Video source not found" });
-        }
+        // Ambil origin asli untuk menyamar (Bypass proteksi 403 Forbidden)
+        const targetOrigin = new URL(targetUrl).origin;
 
-        const baseUrl = `${req.protocol}://${req.get('host')}`;
-        
-        res.json({
-            success: true,
-            sources: watch.sources.map(s => ({
-                quality: s.quality,
-                url: s.url,
-                // URL Proxy yang langsung bisa dicolok ke HLS.js di frontend
-                proxyUrl: `${baseUrl}/proxy?url=${encodeURIComponent(s.url)}`,
-                isM3U8: s.url.includes('.m3u8')
-            }))
-        });
-        
-    } catch (e) {
-        res.status(500).json({ success: false, message: e.message });
-    }
-});
-
-// 3. PROXY SERVER (Bypass CORS & Rewrite Playlist HLS)
-app.get('/proxy', async (req, res) => {
-    try {
-        const { url } = req.query;
-        if (!url) return res.status(400).json({ error: "URL parameter required" });
-
-        const response = await axios.get(url, { 
-            headers: HEADERS, 
+        const response = await axios.get(targetUrl, {
+            headers: { 
+                'Referer': targetOrigin,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            },
             responseType: 'arraybuffer',
-            timeout: 15000 
+            timeout: 20000 // Timeout 20 detik (Render kadang butuh waktu)
         });
 
-        res.setHeader('Access-Control-Allow-Origin', '*');
+        // Set Headers untuk balasan ke frontend lu
         const contentType = response.headers['content-type'] || 'application/vnd.apple.mpegurl';
         res.setHeader('Content-Type', contentType);
-        
-        const isM3u8 = url.includes('.m3u8') || contentType.includes('mpegurl');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+
+        // Cek apakah ini file playlist M3U8
+        const isM3u8 = targetUrl.includes('.m3u8') || contentType.includes('mpegurl');
 
         if (isM3u8) {
-            const baseUrl = `${req.protocol}://${req.get('host')}/proxy?url=`;
-            let playlist = response.data.toString('utf8');
+            // Deteksi link Render lu otomatis untuk bikin URL proxy
+            const protocol = req.protocol; // akan otomatis jadi 'https' di Render
+            const host = req.get('host');
+            const proxyEndpoint = `${protocol}://${host}/api/proxy?url=`;
+
+            let playlist = Buffer.from(response.data).toString('utf8');
             
             playlist = playlist.split('\n').map(line => {
-                // Rewrite Key URL (buat video yang dienkripsi AES)
+                // 1. Rewrite URL kunci enkripsi (Jika ada)
                 if (line.startsWith('#EXT-X-KEY:')) {
                     return line.replace(/URI="(.*?)"/, (match, p1) => {
-                        return `URI="${baseUrl}${encodeURIComponent(new URL(p1, url).href)}"`;
+                        const absoluteKeyUrl = new URL(p1, targetUrl).href;
+                        return `URI="${proxyEndpoint}${encodeURIComponent(absoluteKeyUrl)}"`;
                     });
                 }
-                // Abaikan tag m3u8 dan baris kosong
+                
+                // Jangan ubah tag bawaan HLS
                 if (line.startsWith('#') || !line.trim()) return line;
                 
-                // Rewrite Chunk .ts URL biar lewat proxy juga
-                return `${baseUrl}${encodeURIComponent(new URL(line.trim(), url).href)}`;
+                // 2. Rewrite link file video (.ts) biar lewat proxy
+                const absoluteUrl = new URL(line.trim(), targetUrl).href;
+                return `${proxyEndpoint}${encodeURIComponent(absoluteUrl)}`;
             }).join('\n');
             
-            res.send(playlist);
-        } else {
-            // Kalau file .ts biasa, langsung kirim buffer-nya
-            res.send(response.data);
+            return res.send(playlist);
         }
-    } catch (e) {
-        console.error("Proxy Error:", e.message);
-        res.status(500).send("Proxy failed");
+        
+        // Kalau yang diminta file video (.ts) / gambar, langsung teruskan data buffer-nya
+        return res.send(response.data);
+        
+    } catch (error) {
+        console.error("Proxy Error fetching:", targetUrl, error.message);
+        return res.status(500).send("Proxy Error");
     }
 });
 
-const PORT = process.env.PORT || 3001;
+// ==========================================
+// 3. JALANKAN SERVER
+// ==========================================
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(` API Backend & Proxy jalan di http://localhost:${PORT}`);
+    console.log(`🚀 API Server AnimeKu berjalan di port ${PORT}`);
 });
