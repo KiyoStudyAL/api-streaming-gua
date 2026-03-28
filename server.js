@@ -7,8 +7,8 @@ const app = express();
 app.set('trust proxy', true); 
 app.use(cors({ origin: '*', methods:['GET', 'POST', 'OPTIONS'] }));
 
-// 🔥 KITA KUNCI PAKAI ANIMEPAHE KARENA TERBUKTI SUKSES DI TEST!
-const provider = new ANIME.AnimePahe();
+// 🔥 GANTI KE HIANIME: Karena AnimePahe memblokir IP Render (Cloudflare)
+const provider = new ANIME.Hianime();
 
 // 1. API Scraper
 app.get('/api/anime', async (req, res) => {
@@ -23,13 +23,14 @@ app.get('/api/anime', async (req, res) => {
             return res.json({ sukses: true, data: info });
         }
         if (action === 'watch') {
+            // Hianime butuh ID episode langsung
             const watch = await provider.fetchEpisodeSources(decodeURIComponent(id));
             if (!watch || !watch.sources || !watch.sources.length) {
                 return res.status(404).json({ sukses: false, pesan: "Sumber video kosong/diblokir" });
             }
             
-            // Cari kualitas terbaik (Auto / 1080p / 720p / atau yang pertama)
-            const source = watch.sources.find(s => s.quality === 'auto' || s.quality === 'default' || s.quality === '1080p' || s.quality === '720p') || watch.sources[0];
+            // Hianime biasanya punya kualitas 'auto'
+            const source = watch.sources.find(s => s.quality === 'auto' || s.quality === 'default' || s.quality === '1080p') || watch.sources[0];
             return res.json({ sukses: true, link: source.url });
         }
         res.status(400).json({ sukses: false, pesan: "Aksi salah" });
@@ -39,7 +40,7 @@ app.get('/api/anime', async (req, res) => {
     }
 });
 
-// 2. API Proxy Video (Anti-Blokir Kwik / UwUCDN dari AnimePahe)
+// 2. API Proxy Video
 app.get('/api/proxy', async (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).send("No URL");
@@ -48,7 +49,7 @@ app.get('/api/proxy', async (req, res) => {
         const target = new URL(targetUrl);
         const isM3u8 = targetUrl.includes('.m3u8');
         
-        // 🔥 Header Penyamaran Kelas Dewa agar CDN uwucdn / kwik tertipu
+        // Header Penyamaran
         const customHeaders = { 
             'Referer': target.origin + '/', 
             'Origin': target.origin,
@@ -66,7 +67,6 @@ app.get('/api/proxy', async (req, res) => {
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
 
-            // Amankan protokol proxy
             const protocol = req.headers['x-forwarded-proto'] || 'https';
             const proxyBase = `${protocol}://${req.get('host')}/api/proxy?url=`;
             
@@ -82,7 +82,7 @@ app.get('/api/proxy', async (req, res) => {
             return res.send(playlist);
         } 
         
-        // PROXY VIDEO (.ts file) PAKE STREAM biar Render Free ga Overload RAM!
+        // PROXY VIDEO (.ts file) PAKE STREAM biar Render ga drop!
         const streamResponse = await axios({
             method: 'get',
             url: targetUrl,
