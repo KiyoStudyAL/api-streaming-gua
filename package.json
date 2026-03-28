@@ -4,6 +4,9 @@
   "description": "API Streaming Anime dengan Proxy M3U8",
   "main": "server.js",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"
