@@ -109,7 +109,7 @@ app.get('/api/movie/:tmdb_id', async (req, res) => {
         const tmdbData = tmdbRes.data;
 
         // [UPDATE] Bikin URL dinamis agar mendeteksi sedang jalan di Localhost atau Render otomatis
-        const BACKEND_URL = \`\${req.protocol}://\${req.get('host')}\`;
+        const BACKEND_URL = "https://api-streaming-gua.onrender.com";
 
         res.json({
             status: "success",
