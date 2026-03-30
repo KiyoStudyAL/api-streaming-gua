@@ -284,3 +284,28 @@ app.get('/api/movies', async (req, res) => {
                     sinopsis: "",
                     trailer_url: null,
                     embed_url: `${BACKEND_URL}/embed/${id}`
+                };
+            }
+        }));
+
+        // 5. Simpan ke Cache
+        moviesCache = moviesData;
+        lastCacheTime = currentTime;
+
+        // 6. Kirim ke Frontend
+        res.json({
+            status: "success",
+            source: "tmdb_api",
+            total: moviesData.length,
+            data: moviesData
+        });
+
+    } catch (error) {
+        console.error("Error Get All Movies:", error.message);
+        res.status(500).json({ error: "Terjadi kesalahan internal backend" });
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`🚀 Backend jalan di port ${PORT}`);
+});
