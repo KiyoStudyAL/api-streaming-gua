@@ -16,7 +16,7 @@ app.use(express.json());
 const CLOUDFLARE_DOMAIN = "cdn.nekoplay.web.id"; 
 
 // ----------------------------------------------------
-// 0. HALAMAN DEPAN (Biar pas Render dibuka gak error)
+// 0. HALAMAN DEPAN
 // ----------------------------------------------------
 app.get('/', (req, res) => {
     res.send("<h1 style='text-align:center; margin-top:20%; font-family:sans-serif;'>🚀 API Streaming Aktif & Siap Digunakan!</h1>");
@@ -37,17 +37,24 @@ app.get('/embed/:tmdb_id', async (req, res) => {
             return res.status(404).send("<h2 style='color:white; text-align:center; font-family:sans-serif; margin-top:20%'>Video belum tersedia</h2>");
         }
 
-        // [BUG FIX] Sudah ditambahkan https:// agar browser bisa muter videonya
-        const videoStreamUrl = `https://${CLOUDFLARE_DOMAIN}${dataFirebase.video_path}`;
+        // [PERBAIKAN] Cek apakah video_path pakai absolute URL atau relative URL
+        let videoStreamUrl = dataFirebase.video_path;
+        if (!videoStreamUrl.startsWith('http')) {
+            videoStreamUrl = `https://${CLOUDFLARE_DOMAIN}${videoStreamUrl}`;
+        }
 
-        //[BUG FIX] Sudah ditambahkan https:// untuk subtitle
+        // [PERBAIKAN] Cek juga URL subtitle untuk mencegah double https
         let tracksHTML = "";
         if (dataFirebase.subtitles) {
             if (dataFirebase.subtitles.indonesian) {
-                tracksHTML += `<track kind="captions" label="Indonesia" srclang="id" src="https://${CLOUDFLARE_DOMAIN}${dataFirebase.subtitles.indonesian}" default />\n`;
+                let subIndo = dataFirebase.subtitles.indonesian;
+                if (!subIndo.startsWith('http')) subIndo = `https://${CLOUDFLARE_DOMAIN}${subIndo}`;
+                tracksHTML += `<track kind="captions" label="Indonesia" srclang="id" src="${subIndo}" default />\n`;
             }
             if (dataFirebase.subtitles.english) {
-                tracksHTML += `<track kind="captions" label="English" srclang="en" src="https://${CLOUDFLARE_DOMAIN}${dataFirebase.subtitles.english}" />\n`;
+                let subEng = dataFirebase.subtitles.english;
+                if (!subEng.startsWith('http')) subEng = `https://${CLOUDFLARE_DOMAIN}${subEng}`;
+                tracksHTML += `<track kind="captions" label="English" srclang="en" src="${subEng}" />\n`;
             }
         }
 
@@ -101,6 +108,7 @@ app.get('/embed/:tmdb_id', async (req, res) => {
         res.send(htmlPlayer);
 
     } catch (error) {
+        console.error("Error embed:", error.message);
         res.status(500).send("<h2 style='color:white; text-align:center;'>Terjadi kesalahan server</h2>");
     }
 });
@@ -118,8 +126,10 @@ app.get('/api/movie/:tmdb_id', async (req, res) => {
         const tmdbRes = await axios.get(tmdbURL).catch(() => ({ data: null }));
         const tmdbData = tmdbRes.data;
 
-        // URL Render 100% Permanen dan Aman
-        const BACKEND_URL = "https://api-streaming-gua.onrender.com";
+        // [UPGRADE] Bikin URL Backend dinamis, mendeteksi otomatis protocol (http/https) dan host (localhost/render)
+        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+        const host = req.get('host');
+        const BACKEND_URL = `${protocol}://${host}`;
 
         res.json({
             status: "success",
@@ -134,10 +144,11 @@ app.get('/api/movie/:tmdb_id', async (req, res) => {
         });
 
     } catch (error) {
+        console.error("Error API:", error.message);
         res.status(500).json({ error: "Terjadi kesalahan", detail: error.message });
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`Backend jalan di port ${PORT}`);
+    console.log(`🚀 Backend jalan di port ${PORT}`);
 });
