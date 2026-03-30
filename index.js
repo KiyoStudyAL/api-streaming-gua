@@ -6,11 +6,21 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// [PENTING] Agar Express bisa jalan normal di Render
+app.set('trust proxy', 1);
+
 app.use(cors());
 app.use(express.json());
 
-// GANTI dengan domain CDN / B2 kamu
+// Domain CDN kamu
 const CLOUDFLARE_DOMAIN = "cdn.nekoplay.web.id"; 
+
+// ----------------------------------------------------
+// 0. HALAMAN DEPAN (Biar pas Render dibuka gak error)
+// ----------------------------------------------------
+app.get('/', (req, res) => {
+    res.send("<h1 style='text-align:center; margin-top:20%; font-family:sans-serif;'>🚀 API Streaming Aktif & Siap Digunakan!</h1>");
+});
 
 // ----------------------------------------------------
 // 1. ENDPOINT EMBED (HTML PLAYER)
@@ -19,7 +29,6 @@ app.get('/embed/:tmdb_id', async (req, res) => {
     const tmdbId = req.params.tmdb_id;
 
     try {
-        // [UPDATE] URL Firebase disesuaikan dengan screenshot kamu
         const firebaseURL = `https://movieku-al-default-rtdb.asia-southeast1.firebasedatabase.app/movies/${tmdbId}.json`;
         const firebaseRes = await axios.get(firebaseURL);
         const dataFirebase = firebaseRes.data;
@@ -28,16 +37,17 @@ app.get('/embed/:tmdb_id', async (req, res) => {
             return res.status(404).send("<h2 style='color:white; text-align:center; font-family:sans-serif; margin-top:20%'>Video belum tersedia</h2>");
         }
 
-        const videoStreamUrl = `${CLOUDFLARE_DOMAIN}${dataFirebase.video_path}`;
+        // [BUG FIX] Sudah ditambahkan https:// agar browser bisa muter videonya
+        const videoStreamUrl = `https://${CLOUDFLARE_DOMAIN}${dataFirebase.video_path}`;
 
-        // [UPDATE] Memasukkan Subtitle ke dalam tag <track> HTML
+        //[BUG FIX] Sudah ditambahkan https:// untuk subtitle
         let tracksHTML = "";
         if (dataFirebase.subtitles) {
             if (dataFirebase.subtitles.indonesian) {
-                tracksHTML += `<track kind="captions" label="Indonesia" srclang="id" src="${CLOUDFLARE_DOMAIN}${dataFirebase.subtitles.indonesian}" default />\n`;
+                tracksHTML += `<track kind="captions" label="Indonesia" srclang="id" src="https://${CLOUDFLARE_DOMAIN}${dataFirebase.subtitles.indonesian}" default />\n`;
             }
             if (dataFirebase.subtitles.english) {
-                tracksHTML += `<track kind="captions" label="English" srclang="en" src="${CLOUDFLARE_DOMAIN}${dataFirebase.subtitles.english}" />\n`;
+                tracksHTML += `<track kind="captions" label="English" srclang="en" src="https://${CLOUDFLARE_DOMAIN}${dataFirebase.subtitles.english}" />\n`;
             }
         }
 
@@ -53,12 +63,12 @@ app.get('/embed/:tmdb_id', async (req, res) => {
             <style>
                 body { margin: 0; background-color: #000; overflow: hidden; }
                 video { width: 100vw; height: 100vh; object-fit: cover; }
-                :root { --plyr-color-main: #e50914; } /* Warna merah elegan ala Netflix */
+                :root { --plyr-color-main: #e50914; } /* Warna merah Netflix */
             </style>
         </head>
         <body>
             <video id="player" controls crossorigin playsinline>
-                ${tracksHTML} <!-- Subtitle dimasukkan ke sini -->
+                ${tracksHTML}
             </video>
             
             <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
@@ -68,7 +78,7 @@ app.get('/embed/:tmdb_id', async (req, res) => {
                     const video = document.querySelector('#player');
                     const source = '${videoStreamUrl}';
                     const defaultOptions = {
-                        captions: { active: true, update: true, language: 'id' } // Aktifkan subtitle otomatis
+                        captions: { active: true, update: true, language: 'id' } 
                     };
 
                     if (Hls.isSupported()) {
@@ -108,7 +118,7 @@ app.get('/api/movie/:tmdb_id', async (req, res) => {
         const tmdbRes = await axios.get(tmdbURL).catch(() => ({ data: null }));
         const tmdbData = tmdbRes.data;
 
-        // [UPDATE] Bikin URL dinamis agar mendeteksi sedang jalan di Localhost atau Render otomatis
+        // URL Render 100% Permanen dan Aman
         const BACKEND_URL = "https://api-streaming-gua.onrender.com";
 
         res.json({
@@ -117,9 +127,8 @@ app.get('/api/movie/:tmdb_id', async (req, res) => {
                 id_tmdb: tmdbId,
                 info: {
                     judul: tmdbData ? tmdbData.title : "Judul Tidak Diketahui",
-                    poster: tmdbData ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : null,
+                    poster: tmdbData && tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : null,
                 },
-                // Link embed langsung otomatis menyesuaikan domain host
                 embed_url: `${BACKEND_URL}/embed/${tmdbId}`
             }
         });
@@ -130,5 +139,5 @@ app.get('/api/movie/:tmdb_id', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`Backend jalan di http://localhost:${PORT}`);
+    console.log(`Backend jalan di port ${PORT}`);
 });
